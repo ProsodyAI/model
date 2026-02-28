@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prosody-ssm"
+version = "0.1.0"
+description = "Prosody-aware speech emotion recognition using State Space Models"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "ProsodyAI"},
+]
+keywords = [
+    "speech-emotion-recognition",
+    "prosody",
+    "langchain",
+    "ssm",
+    "mamba",
+    "asr",
+    "whisper",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "langchain-core>=0.2.0",
+    "pydantic>=2.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+audio = [
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "scipy>=1.11.0",
+]
+asr = [
+    "faster-whisper>=1.0.0",
+]
+phonetics = [
+    "phonemizer>=3.2.0",
+]
+torch = [
+    "torch>=2.0.0",
+    "einops>=0.7.0",
+]
+all = [
+    "prosody-ssm[audio,asr,phonetics,torch]",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ProsodyAI/model"
+Documentation = "https://github.com/ProsodyAI/model#readme"
+Repository = "https://github.com/ProsodyAI/model"
+
+[tool.setuptools.packages.find]
+include = ["prosody_ssm*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4",
+]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["librosa.*", "scipy.*", "torch.*", "faster_whisper.*", "whisper.*", "phonemizer.*"]
+ignore_missing_imports = true
