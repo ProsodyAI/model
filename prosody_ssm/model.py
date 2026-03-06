@@ -324,7 +324,14 @@ if TORCH_AVAILABLE:
     class WavLMBackbone(nn.Module):
         """Frozen WavLM-Large as prosodic feature extractor."""
 
-        def __init__(self, d_model: int = 256):
+        def __init__(
+            self,
+            d_model: int = 512,
+            use_weighted_layers: bool = True,
+            specaugment_prob: float = 0.5,
+            specaugment_time_mask: int = 20,
+            specaugment_freq_mask: int = 64,
+        ):
             super().__init__()
             try:
                 from transformers import WavLMModel
@@ -334,17 +341,111 @@ if TORCH_AVAILABLE:
                     "Install with: pip install transformers"
                 )
             self.wavlm = WavLMModel.from_pretrained("microsoft/wavlm-large")
+            self.wavlm.config.output_hidden_states = True
             for param in self.wavlm.parameters():
                 param.requires_grad = False
+            self.use_weighted_layers = use_weighted_layers
+            self.specaugment_prob = specaugment_prob
+            self.specaugment_time_mask = specaugment_time_mask
+            self.specaugment_freq_mask = specaugment_freq_mask
+            self.layer_weights = nn.Parameter(torch.ones(25) / 25.0)
             self.proj = nn.Linear(1024, d_model)
             self.norm = nn.LayerNorm(d_model)
+
+        def _spec_augment(self, features: torch.Tensor) -> torch.Tensor:
+            """Apply lightweight SpecAugment on WavLM hidden representations."""
+            if (not self.training) or torch.rand(1).item() > self.specaugment_prob:
+                return features
+            out = features.clone()
+            batch, timesteps, dims = out.shape
+            if timesteps > 2:
+                t = int(torch.randint(0, min(self.specaugment_time_mask, timesteps - 1) + 1, (1,)).item())
+                if t > 0:
+                    t0 = int(torch.randint(0, timesteps - t + 1, (1,)).item())
+                    out[:, t0:t0 + t, :] = 0
+            if dims > 2:
+                f = int(torch.randint(0, min(self.specaugment_freq_mask, dims - 1) + 1, (1,)).item())
+                if f > 0:
+                    f0 = int(torch.randint(0, dims - f + 1, (1,)).item())
+                    out[:, :, f0:f0 + f] = 0
+            return out
 
         def forward(self, waveform: torch.Tensor) -> torch.Tensor:
             """waveform: (batch, samples) at 16kHz -> (batch, seq_len, d_model)"""
             with torch.no_grad():
-                outputs = self.wavlm(waveform)
-                features = outputs.last_hidden_state  # (batch, seq_len, 1024)
+                outputs = self.wavlm(waveform, output_hidden_states=True)
+                if self.use_weighted_layers and outputs.hidden_states is not None:
+                    stacked = torch.stack(outputs.hidden_states, dim=0)  # (25, B, T, 1024)
+                    weights = F.softmax(self.layer_weights, dim=0).view(25, 1, 1, 1)
+                    features = (stacked * weights).sum(dim=0)
+                else:
+                    features = outputs.last_hidden_state  # (batch, seq_len, 1024)
+            features = self._spec_augment(features)
             return self.norm(self.proj(features))
+
+    class DualStreamFusion(nn.Module):
+        """Fuse learned WavLM features with explicit prosodic cues."""
+
+        def __init__(self, d_model: int = 512, prosody_dim: int = 28, n_heads: int = 8):
+            super().__init__()
+            self.prosody_proj = nn.Sequential(
+                nn.Linear(prosody_dim, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+            )
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=n_heads,
+                batch_first=True,
+            )
+            self.gate = nn.Sequential(
+                nn.Linear(d_model * 2, d_model),
+                nn.Sigmoid(),
+            )
+            self.norm = nn.LayerNorm(d_model)
+
+        def forward(self, wavlm_seq: torch.Tensor, prosody_features: torch.Tensor) -> torch.Tensor:
+            prosody_seq = self.prosody_proj(prosody_features)
+            if prosody_seq.shape[1] != wavlm_seq.shape[1]:
+                prosody_seq = F.interpolate(
+                    prosody_seq.transpose(1, 2),
+                    size=wavlm_seq.shape[1],
+                    mode="linear",
+                    align_corners=False,
+                ).transpose(1, 2)
+            fused, _ = self.cross_attn(prosody_seq, wavlm_seq, wavlm_seq)
+            gate = self.gate(torch.cat([prosody_seq, fused], dim=-1))
+            return self.norm(gate * fused + (1 - gate) * wavlm_seq)
+
+    class AttentiveStatisticsPooling(nn.Module):
+        """Attention-weighted mean + standard deviation pooling."""
+
+        def __init__(self, d_model: int):
+            super().__init__()
+            self.attention = nn.Sequential(
+                nn.Linear(d_model, d_model // 4),
+                nn.Tanh(),
+                nn.Linear(d_model // 4, 1),
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            weights = F.softmax(self.attention(x), dim=1)
+            mean = (weights * x).sum(dim=1)
+            var = (weights * (x - mean.unsqueeze(1)).pow(2)).sum(dim=1)
+            std = torch.sqrt(torch.clamp(var, min=1e-6))
+            return torch.cat([mean, std], dim=-1)
+
+    class GradientReversal(torch.autograd.Function):
+        """Gradient reversal for adversarial speaker invariance."""
+
+        @staticmethod
+        def forward(ctx, x: torch.Tensor, alpha: float) -> torch.Tensor:
+            ctx.alpha = alpha
+            return x
+
+        @staticmethod
+        def backward(ctx, grad_output: torch.Tensor):
+            return -ctx.alpha * grad_output, None
 
     # -------------------------------------------------------------------
     # KPI-conditioned prediction head
@@ -481,9 +582,9 @@ if TORCH_AVAILABLE:
 
         def __init__(
             self,
-            d_model: int = 256,
-            n_layers: int = 4,
-            d_state: int = 64,
+            d_model: int = 512,
+            n_layers: int = 6,
+            d_state: int = 128,
             n_emotions: int = 8,
             d_kpi_embed: int = 32,
             max_categories: int = 16,
@@ -491,6 +592,13 @@ if TORCH_AVAILABLE:
             use_wavlm: bool = True,
             prosody_dim: int = 28,
             phonetic_dim: int = 4,
+            use_weighted_wavlm_layers: bool = True,
+            use_dual_stream_fusion: bool = True,
+            n_speakers: int = 0,
+            speaker_grl_alpha: float = 0.1,
+            specaugment_prob: float = 0.5,
+            specaugment_time_mask: int = 20,
+            specaugment_freq_mask: int = 64,
         ):
             super().__init__()
 
@@ -500,10 +608,21 @@ if TORCH_AVAILABLE:
             self.n_emotions = n_emotions
             self.prosody_dim = prosody_dim
             self.phonetic_dim = phonetic_dim
+            self.n_speakers = n_speakers
+            self.speaker_grl_alpha = speaker_grl_alpha
+            self.use_dual_stream_fusion = use_dual_stream_fusion and use_wavlm
 
             # --- Feature extraction ---
             if use_wavlm:
-                self.backbone = WavLMBackbone(d_model)
+                self.backbone = WavLMBackbone(
+                    d_model=d_model,
+                    use_weighted_layers=use_weighted_wavlm_layers,
+                    specaugment_prob=specaugment_prob,
+                    specaugment_time_mask=specaugment_time_mask,
+                    specaugment_freq_mask=specaugment_freq_mask,
+                )
+                if self.use_dual_stream_fusion:
+                    self.dual_fusion = DualStreamFusion(d_model=d_model, prosody_dim=prosody_dim)
             else:
                 self.prosody_embed = nn.Sequential(
                     nn.Linear(prosody_dim, d_model // 2),
@@ -528,20 +647,22 @@ if TORCH_AVAILABLE:
                 MambaBlock(d_model, d_state, dropout=dropout)
                 for _ in range(n_layers)
             ])
+            self.pool = AttentiveStatisticsPooling(d_model)
+            pooled_dim = d_model * 2
 
             # --- Output heads ---
 
             self.classifier = nn.Sequential(
-                nn.LayerNorm(d_model),
-                nn.Linear(d_model, d_model),
+                nn.LayerNorm(pooled_dim),
+                nn.Linear(pooled_dim, d_model),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(d_model, n_emotions),
             )
 
             self.vad_head = nn.Sequential(
-                nn.LayerNorm(d_model),
-                nn.Linear(d_model, d_model // 2),
+                nn.LayerNorm(pooled_dim),
+                nn.Linear(pooled_dim, d_model // 2),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(d_model // 2, 3),
@@ -549,19 +670,27 @@ if TORCH_AVAILABLE:
             )
 
             self.kpi_head = KPIHead(
-                d_model=d_model,
+                d_model=pooled_dim,
                 d_kpi_embed=d_kpi_embed,
                 max_categories=max_categories,
             )
+
+            self.speaker_head = None
+            if n_speakers and n_speakers > 1:
+                self.speaker_head = nn.Linear(d_model, n_speakers)
 
             self._init_weights()
 
         def _init_weights(self):
             # Only init our heads and projection layers. Skip frozen WavLM
             # weights and mamba_ssm internals (they handle their own init).
-            targets = [self.classifier, self.vad_head, self.kpi_head]
+            targets = [self.classifier, self.vad_head, self.kpi_head, self.pool]
+            if self.speaker_head is not None:
+                targets.append(self.speaker_head)
             if self.use_wavlm:
                 targets.append(self.backbone.proj)
+                if self.use_dual_stream_fusion:
+                    targets.append(self.dual_fusion)
             else:
                 targets.extend([self.prosody_embed, self.phonetic_embed, self.fusion])
             if not MAMBA_SSM_AVAILABLE:
@@ -578,7 +707,7 @@ if TORCH_AVAILABLE:
             waveform: Optional[torch.Tensor] = None,
             prosody_features: Optional[torch.Tensor] = None,
             phonetic_features: Optional[torch.Tensor] = None,
-        ) -> torch.Tensor:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             """
             Encode input into a pooled representation vector.
 
@@ -587,10 +716,14 @@ if TORCH_AVAILABLE:
             and optionally phonetic_features (batch, seq_len, phonetic_dim).
 
             Returns:
-                Pooled representation: (batch, d_model)
+                Tuple of:
+                    sequence representation: (batch, seq_len, d_model)
+                    pooled representation: (batch, 2 * d_model)
             """
             if self.use_wavlm:
                 x = self.backbone(waveform)
+                if self.use_dual_stream_fusion and prosody_features is not None:
+                    x = self.dual_fusion(x, prosody_features)
             else:
                 batch, seq_len, _ = prosody_features.shape
                 prosody_emb = self.prosody_embed(prosody_features)
@@ -609,7 +742,8 @@ if TORCH_AVAILABLE:
             for block in self.blocks:
                 x = block(x)
 
-            return x.mean(dim=1)  # (batch, d_model)
+            pooled = self.pool(x)
+            return x, pooled
 
         def forward(
             self,
@@ -643,9 +777,9 @@ if TORCH_AVAILABLE:
                     'kpi_category_logits': (batch, max_categories) — for categorical KPIs
             """
             if self.use_wavlm:
-                repr = self.encode(waveform=waveform)
+                seq_repr, repr = self.encode(waveform=waveform, prosody_features=prosody_features)
             else:
-                repr = self.encode(
+                seq_repr, repr = self.encode(
                     prosody_features=prosody_features,
                     phonetic_features=phonetic_features,
                 )
@@ -657,7 +791,13 @@ if TORCH_AVAILABLE:
                 "emotion_logits": emotion_logits,
                 "vad": vad,
                 "repr": repr,
+                "sequence_repr": seq_repr,
             }
+
+            if self.speaker_head is not None:
+                speaker_input = seq_repr.mean(dim=1)
+                grl_input = GradientReversal.apply(speaker_input, self.speaker_grl_alpha)
+                result["speaker_logits"] = self.speaker_head(grl_input)
 
             if kpi_type is not None:
                 kpi_out = self.kpi_head(
@@ -775,11 +915,12 @@ if TORCH_AVAILABLE:
                 x_out = x
                 new_state = {'blocks': new_block_states}
 
-            emotion_logits = self.classifier(x_out)
+            pooled = torch.cat([x_out, torch.zeros_like(x_out)], dim=-1)
+            emotion_logits = self.classifier(pooled)
             emotion_probs = F.softmax(emotion_logits, dim=-1)
-            vad = self.vad_head(x_out)
+            vad = self.vad_head(pooled)
 
-            new_state['repr'] = x_out
+            new_state['repr'] = pooled
             return emotion_probs, vad, new_state
 
         def predict(
@@ -965,6 +1106,9 @@ if TORCH_AVAILABLE:
                 valid_keys = {
                     "use_wavlm", "prosody_dim", "phonetic_dim", "d_model", "n_layers",
                     "d_state", "n_emotions", "d_kpi_embed", "max_categories", "dropout",
+                    "use_weighted_wavlm_layers", "use_dual_stream_fusion", "n_speakers",
+                    "speaker_grl_alpha", "specaugment_prob", "specaugment_time_mask",
+                    "specaugment_freq_mask",
                 }
                 filtered_config = {k: v for k, v in config.items() if k in valid_keys}
                 if "use_wavlm" not in filtered_config:
@@ -989,6 +1133,9 @@ if TORCH_AVAILABLE:
             valid_keys = {
                 "use_wavlm", "prosody_dim", "phonetic_dim", "d_model", "n_layers",
                 "d_state", "n_emotions", "d_kpi_embed", "max_categories", "dropout",
+                "use_weighted_wavlm_layers", "use_dual_stream_fusion", "n_speakers",
+                "speaker_grl_alpha", "specaugment_prob", "specaugment_time_mask",
+                "specaugment_freq_mask",
             }
             filtered_config = {k: v for k, v in config.items() if k in valid_keys}
             if "use_wavlm" not in filtered_config:
@@ -1008,6 +1155,13 @@ if TORCH_AVAILABLE:
                 'd_state': config.get('d_state', self.d_state),
                 'n_emotions': config.get('n_emotions', self.n_emotions),
                 'dropout': config.get('dropout', self.blocks[0].dropout.p),
+                'use_weighted_wavlm_layers': config.get('use_weighted_wavlm_layers', True),
+                'use_dual_stream_fusion': config.get('use_dual_stream_fusion', self.use_dual_stream_fusion),
+                'n_speakers': config.get('n_speakers', self.n_speakers),
+                'speaker_grl_alpha': config.get('speaker_grl_alpha', self.speaker_grl_alpha),
+                'specaugment_prob': config.get('specaugment_prob', getattr(self.backbone, 'specaugment_prob', 0.5) if self.use_wavlm else 0.0),
+                'specaugment_time_mask': config.get('specaugment_time_mask', getattr(self.backbone, 'specaugment_time_mask', 20) if self.use_wavlm else 0),
+                'specaugment_freq_mask': config.get('specaugment_freq_mask', getattr(self.backbone, 'specaugment_freq_mask', 64) if self.use_wavlm else 0),
             }
             if not self.use_wavlm:
                 full_config['prosody_dim'] = config.get('prosody_dim', self.prosody_dim)
