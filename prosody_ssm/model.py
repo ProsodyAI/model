@@ -30,9 +30,10 @@ The emotion head remains available for representation learning and as a
 useful signal where outcome data is not yet available.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
 import numpy as np
 
 try:
@@ -43,8 +44,7 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from prosody_ssm.features import ProsodyFeatures, PhoneticFeatures
-
+from prosody_ssm.features import PhoneticFeatures, ProsodyFeatures
 
 # ---------------------------------------------------------------------------
 # Emotion types (legacy — kept for backward compatibility)
@@ -1051,7 +1051,7 @@ if TORCH_AVAILABLE:
             Scalar loss tensor
         """
         kpi_value = predictions["kpi_value"]  # (batch,) -- raw predicted values
-        batch_size = kpi_type.shape[0]
+        kpi_type.shape[0]
         device = kpi_type.device
 
         total_loss = torch.tensor(0.0, device=device)
@@ -1123,7 +1123,7 @@ else:
                 import warnings
                 warnings.warn(
                     "PyTorch not available. Using heuristic predictions. "
-                    "Install PyTorch for the full SSM model."
+                    "Install PyTorch for the full SSM model.", stacklevel=2
                 )
                 self._warned = True
 
@@ -1158,7 +1158,7 @@ else:
             energy_mean = prosody_features.energy_mean
             speech_rate = prosody_features.speech_rate
 
-            scores = {label: 0.0 for label in EmotionLabel}
+            scores = dict.fromkeys(EmotionLabel, 0.0)
 
             if f0_mean > 200 and energy_mean > 0.1 and speech_rate > 3:
                 if f0_range > 100:

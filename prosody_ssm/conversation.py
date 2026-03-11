@@ -9,14 +9,14 @@ Tracks user emotional state over time and provides:
 
 from __future__ import annotations
 
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, TYPE_CHECKING
-from collections import deque
-import time
+from typing import TYPE_CHECKING, Optional
 
-from prosody_ssm.model import EmotionLabel, EmotionPrediction
 from prosody_ssm.conversation_model import ForwardPrediction, RecommendedTone
+from prosody_ssm.model import EmotionLabel, EmotionPrediction
 
 if TYPE_CHECKING:
     from prosody_ssm.conversation_model import ConversationPredictor
@@ -62,40 +62,40 @@ class EmotionSnapshot:
 @dataclass
 class ConversationEmotionState:
     """Aggregated emotional state for a conversation."""
-    
+
     # Current state (raw, per-utterance)
     current_emotion: EmotionLabel
     current_confidence: float
     current_valence: float
     current_arousal: float
     current_dominance: float
-    
+
     # Smoothed state (EMA-filtered, for decision-making)
     smoothed_valence: float
     smoothed_arousal: float
-    
+
     # Spike detection
     spike_detected: bool  # True when raw deviates significantly from smoothed
     consecutive_negative: int  # Consecutive readings below negative threshold
-    
+
     # Trajectory
     trajectory: EmotionTrajectory
     valence_trend: float  # Positive = improving, negative = declining
-    
+
     # Risk assessment (based on smoothed values, not raw)
     escalation_risk: EscalationRisk
     negative_emotion_count: int
     peak_negative_valence: float
-    
+
     # Aggregates
     avg_valence: float
     avg_arousal: float
     segment_count: int
-    
+
     # Recommendations
     recommended_tone: AgentTone
     coaching_hint: str
-    
+
     # Forward predictions (from ConversationPredictor, None when predictor unavailable)
     forward_predictions: Optional[ForwardPrediction] = None
 
@@ -103,11 +103,11 @@ class ConversationEmotionState:
 class EmotionTracker:
     """
     Tracks emotional state across a conversation.
-    
+
     Maintains a sliding window of emotion readings and computes
     aggregate metrics for trajectory analysis and TTS adaptation.
     """
-    
+
     def __init__(
         self,
         window_size: int = 10,
@@ -120,7 +120,7 @@ class EmotionTracker:
     ):
         """
         Initialize tracker.
-        
+
         Args:
             window_size: Number of recent readings to consider
             trajectory_threshold: Valence change to count as improving/declining
@@ -140,36 +140,36 @@ class EmotionTracker:
         self.smoothing_alpha = smoothing_alpha
         self.escalation_consecutive_threshold = escalation_consecutive_threshold
         self.spike_deviation_threshold = spike_deviation_threshold
-        
+
         self._history: deque[EmotionSnapshot] = deque(maxlen=window_size)
         self._all_readings: list[EmotionSnapshot] = []
         self._negative_count = 0
         self._peak_negative_valence = 0.0
-        
+
         # EMA smoothed values (initialized on first reading)
         self._smoothed_valence: Optional[float] = None
         self._smoothed_arousal: Optional[float] = None
-        
+
         # Consecutive negative reading counter (resets when valence goes positive)
         self._consecutive_negative = 0
-        
+
         # Accumulate data for the ConversationPredictor
         self._emotion_probs_history: list[list[float]] = []
         self._vad_history: list[list[float]] = []
         self._confidence_history: list[float] = []
         self._forward_predictions: Optional[ForwardPrediction] = None
-        
+
         # Escalation onset callbacks
         self._onset_callbacks: list = []
         self._onset_threshold: float = 0.6
-    
+
     def update(self, prediction: EmotionPrediction) -> ConversationEmotionState:
         """
         Add new emotion reading and compute updated state.
-        
+
         Args:
             prediction: New emotion prediction from model
-            
+
         Returns:
             Updated conversation emotion state
         """
@@ -180,10 +180,10 @@ class EmotionTracker:
             arousal=prediction.arousal,
             dominance=prediction.dominance,
         )
-        
+
         self._history.append(snapshot)
         self._all_readings.append(snapshot)
-        
+
         # Accumulate data for the predictor
         self._emotion_probs_history.append(
             list(prediction.emotion_probabilities.values())
@@ -192,7 +192,7 @@ class EmotionTracker:
             [prediction.valence, prediction.arousal, prediction.dominance]
         )
         self._confidence_history.append(prediction.confidence)
-        
+
         # Update EMA smoothed values
         alpha = self.smoothing_alpha
         if self._smoothed_valence is None:
@@ -202,20 +202,20 @@ class EmotionTracker:
         else:
             self._smoothed_valence = alpha * prediction.valence + (1 - alpha) * self._smoothed_valence
             self._smoothed_arousal = alpha * prediction.arousal + (1 - alpha) * self._smoothed_arousal
-        
+
         # Track consecutive negative readings (resets on positive)
         if prediction.valence < -0.3:
             self._consecutive_negative += 1
             self._negative_count += 1
         else:
             self._consecutive_negative = 0
-        
+
         if prediction.valence < self._peak_negative_valence:
             self._peak_negative_valence = prediction.valence
-        
+
         # Compute forward predictions if predictor is available
         self._forward_predictions = self._get_forward_predictions()
-        
+
         # Fire onset callbacks if escalation onset detected
         if (
             self._forward_predictions is not None
@@ -227,9 +227,9 @@ class EmotionTracker:
                     callback(self._forward_predictions, snapshot)
                 except Exception:
                     pass  # Don't let callback errors break tracking
-        
+
         return self.get_state()
-    
+
     def _get_forward_predictions(self) -> Optional[ForwardPrediction]:
         """Get forward-looking predictions from the ConversationPredictor."""
         if self._predictor is None:
@@ -239,7 +239,7 @@ class EmotionTracker:
             self._vad_history,
             self._confidence_history,
         )
-    
+
     @staticmethod
     def _map_escalation_risk(will_escalate: float) -> EscalationRisk:
         """Map predictor's will_escalate probability to EscalationRisk enum."""
@@ -259,11 +259,11 @@ class EmotionTracker:
     def on_escalation_onset(self, callback, threshold: float = 0.6):
         """
         Register a callback fired when escalation onset is detected.
-        
+
         The callback receives (forward_prediction, current_snapshot) and is
         called when escalation_onset probability crosses the threshold.
         Use this to trigger de-escalation workflows in real-time.
-        
+
         Args:
             callback: Function(ForwardPrediction, EmotionSnapshot) -> None
             threshold: Onset probability threshold (default 0.6)
@@ -275,39 +275,39 @@ class EmotionTracker:
         """Get current aggregated emotional state."""
         if not self._history:
             return self._empty_state()
-        
+
         current = self._history[-1]
         smoothed_valence = self._smoothed_valence if self._smoothed_valence is not None else 0.0
         smoothed_arousal = self._smoothed_arousal if self._smoothed_arousal is not None else 0.5
-        
+
         # Detect spike: raw reading deviates significantly from smoothed
         spike_detected = abs(current.valence - smoothed_valence) > self.spike_deviation_threshold
-        
+
         # Compute averages
         avg_valence = sum(s.valence for s in self._history) / len(self._history)
         avg_arousal = sum(s.arousal for s in self._history) / len(self._history)
-        
+
         # Compute trajectory
         trajectory, valence_trend = self._compute_trajectory()
-        
+
         # Compute escalation risk using SMOOTHED values (not raw current)
         escalation_risk = self._compute_escalation_risk(current, smoothed_valence)
-        
+
         # Determine recommended tone using SMOOTHED values
         recommended_tone = self._recommend_tone(current, trajectory, escalation_risk)
-        
+
         # Override with predictor results when available
         forward_preds = getattr(self, "_forward_predictions", None)
         if forward_preds is not None:
             escalation_risk = self._map_escalation_risk(forward_preds.will_escalate)
             recommended_tone = self._map_recommended_tone(forward_preds.recommended_tone)
-        
+
         # Generate coaching hint (uses potentially-overridden escalation_risk)
         coaching_hint = self._generate_coaching_hint(
             current, trajectory, escalation_risk, recommended_tone,
             spike_detected=spike_detected,
         )
-        
+
         return ConversationEmotionState(
             current_emotion=current.emotion,
             current_confidence=current.confidence,
@@ -330,26 +330,26 @@ class EmotionTracker:
             coaching_hint=coaching_hint,
             forward_predictions=forward_preds,
         )
-    
+
     def _compute_trajectory(self) -> tuple[EmotionTrajectory, float]:
         """Compute emotional trajectory from recent history."""
         if len(self._history) < 3:
             return EmotionTrajectory.STABLE, 0.0
-        
+
         # Compare first half vs second half of window
         mid = len(self._history) // 2
         first_half = list(self._history)[:mid]
         second_half = list(self._history)[mid:]
-        
+
         first_avg = sum(s.valence for s in first_half) / len(first_half)
         second_avg = sum(s.valence for s in second_half) / len(second_half)
-        
+
         trend = second_avg - first_avg
-        
+
         # Check for volatility (high variance)
         valences = [s.valence for s in self._history]
         variance = sum((v - sum(valences)/len(valences))**2 for v in valences) / len(valences)
-        
+
         if variance > 0.15:
             return EmotionTrajectory.VOLATILE, trend
         elif trend > self.trajectory_threshold:
@@ -358,20 +358,20 @@ class EmotionTracker:
             return EmotionTrajectory.DECLINING, trend
         else:
             return EmotionTrajectory.STABLE, trend
-    
+
     def _compute_escalation_risk(
         self, current: EmotionSnapshot, smoothed_valence: float
     ) -> EscalationRisk:
         """
         Assess escalation risk based on smoothed emotion patterns.
-        
+
         Uses smoothed valence (not raw) and requires sustained negative
         readings before escalating to HIGH/CRITICAL. A single angry outburst
         or sarcastic remark won't trigger CRITICAL -- only sustained patterns.
         """
         consecutive = self._consecutive_negative
         threshold = self.escalation_consecutive_threshold
-        
+
         # CRITICAL: sustained high arousal + negative smoothed valence
         # Requires consecutive negative readings to confirm it's not a spike
         if (
@@ -381,18 +381,18 @@ class EmotionTracker:
             and consecutive >= threshold
         ):
             return EscalationRisk.CRITICAL
-        
+
         # HIGH: sustained negative smoothed valence
         if smoothed_valence < self.escalation_valence_threshold and consecutive >= threshold:
             return EscalationRisk.HIGH
-        
+
         # MEDIUM: smoothed valence is negative but not yet sustained,
         # or a single negative reading (informational, not alarming)
         if smoothed_valence < -0.3 or current.valence < -0.3:
             return EscalationRisk.MEDIUM
-        
+
         return EscalationRisk.LOW
-    
+
     def _recommend_tone(
         self,
         current: EmotionSnapshot,
@@ -400,34 +400,34 @@ class EmotionTracker:
         escalation_risk: EscalationRisk,
     ) -> AgentTone:
         """Recommend agent tone based on user's emotional state."""
-        
+
         # Critical escalation: stay calm, de-escalate
         if escalation_risk == EscalationRisk.CRITICAL:
             return AgentTone.CALM
-        
+
         # Angry user: calm and professional
         if current.emotion == EmotionLabel.ANGRY:
             return AgentTone.CALM
-        
+
         # Sad user: empathetic
         if current.emotion == EmotionLabel.SAD:
             return AgentTone.EMPATHETIC
-        
+
         # Fearful/anxious: reassuring
         if current.emotion == EmotionLabel.FEARFUL:
             return AgentTone.REASSURING
-        
+
         # Happy user: match enthusiasm
         if current.emotion == EmotionLabel.HAPPY:
             return AgentTone.ENTHUSIASTIC
-        
+
         # Declining trajectory: empathetic
         if trajectory == EmotionTrajectory.DECLINING:
             return AgentTone.EMPATHETIC
-        
+
         # Default
         return AgentTone.PROFESSIONAL
-    
+
     def _generate_coaching_hint(
         self,
         current: EmotionSnapshot,
@@ -437,9 +437,9 @@ class EmotionTracker:
         spike_detected: bool = False,
     ) -> str:
         """Generate coaching hint for the agent."""
-        
+
         hints = []
-        
+
         # Spike-aware coaching: don't overreact to transient readings
         if spike_detected and escalation_risk not in (EscalationRisk.HIGH, EscalationRisk.CRITICAL):
             hints.append("Momentary tone shift detected -- monitoring. No action needed yet.")
@@ -452,19 +452,19 @@ class EmotionTracker:
                 hints.append("Slight negative sentiment noted. Continue monitoring.")
             else:
                 hints.append("Negative sentiment building. Consider addressing concerns proactively.")
-        
+
         if trajectory == EmotionTrajectory.DECLINING:
             hints.append("Sentiment is declining. Consider checking in on their concerns.")
         elif trajectory == EmotionTrajectory.IMPROVING:
             hints.append("Good progress -- customer sentiment is improving.")
-        
+
         if current.emotion == EmotionLabel.SAD and not spike_detected:
             hints.append("Customer sounds down. Use a warm, supportive tone.")
         elif current.emotion == EmotionLabel.FEARFUL and not spike_detected:
             hints.append("Customer seems anxious. Provide reassurance and clear information.")
-        
+
         return " ".join(hints) if hints else "Continue with professional, helpful tone."
-    
+
     def _empty_state(self) -> ConversationEmotionState:
         """Return empty/default state."""
         return ConversationEmotionState(
@@ -489,7 +489,7 @@ class EmotionTracker:
             coaching_hint="No emotion data yet.",
             forward_predictions=None,
         )
-    
+
     def reset(self):
         """Reset tracker for new conversation."""
         self._history.clear()
@@ -530,7 +530,7 @@ TONE_TO_TTS_SPEED = {
 def get_tts_params_for_tone(tone: AgentTone) -> dict:
     """
     Get TTS parameters for the recommended agent tone.
-    
+
     Returns:
         Dict with 'emotion' and 'speed' for TTS config
     """
@@ -545,16 +545,16 @@ def get_tts_params_for_tone(tone: AgentTone) -> dict:
 def format_emotion_context_for_llm(state: ConversationEmotionState) -> str:
     """
     Format emotional state as context for LLM system prompt.
-    
+
     This enables the LLM to generate emotionally-aware responses.
-    
+
     Returns:
         Formatted string to inject into LLM system prompt
     """
     # Use smoothed values for LLM context (more stable, less reactive to spikes)
     valence = state.smoothed_valence
     arousal = state.smoothed_arousal
-    
+
     context_parts = [
         "## Customer Emotional State",
         "",
@@ -564,10 +564,10 @@ def format_emotion_context_for_llm(state: ConversationEmotionState) -> str:
         f"- **Trajectory**: {state.trajectory.value}",
         f"- **Escalation risk**: {state.escalation_risk.value}",
     ]
-    
+
     if state.spike_detected:
-        context_parts.append(f"- **Note**: Momentary tone shift detected (may be transient, not sustained)")
-    
+        context_parts.append("- **Note**: Momentary tone shift detected (may be transient, not sustained)")
+
     context_parts.extend([
         "",
         "## Response Guidance",
@@ -575,7 +575,7 @@ def format_emotion_context_for_llm(state: ConversationEmotionState) -> str:
         f"- **Recommended tone**: {state.recommended_tone.value}",
         f"- **Coaching**: {state.coaching_hint}",
     ])
-    
+
     # Add specific guidance based on state
     if state.escalation_risk in [EscalationRisk.HIGH, EscalationRisk.CRITICAL]:
         context_parts.extend([
@@ -586,20 +586,20 @@ def format_emotion_context_for_llm(state: ConversationEmotionState) -> str:
             "3. Focus on immediate resolution",
             "4. Avoid defensive language",
         ])
-    
+
     if state.trajectory == EmotionTrajectory.DECLINING:
         context_parts.extend([
             "",
             "Note: Customer sentiment has been declining. Consider asking if there's something else bothering them.",
         ])
-    
+
     return "\n".join(context_parts)
 
 
 def format_emotion_context_compact(state: ConversationEmotionState) -> str:
     """
     Compact emotion context for token-limited LLMs.
-    
+
     Returns:
         Single-line context string
     """

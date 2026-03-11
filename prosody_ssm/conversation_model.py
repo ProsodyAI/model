@@ -29,8 +29,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-import numpy as np
-
 try:
     import torch
     import torch.nn as nn
@@ -40,7 +38,6 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from prosody_ssm.model import EmotionLabel, EmotionPrediction
 
 
 class RecommendedTone(str, Enum):

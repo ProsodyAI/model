@@ -18,18 +18,18 @@ logger = logging.getLogger(__name__)
 class WebSocketAdapter:
     """
     Adapter that bridges a WebSocket connection to the AudioBus.
-    
+
     Handles:
     - Binary messages as raw PCM int16
     - JSON messages with base64-encoded audio
     - Session lifecycle (create, close)
     """
-    
+
     def __init__(self, bus: AudioBus, sample_rate: int = 16000):
         self.bus = bus
         self.sample_rate = sample_rate
         self._sequence: dict[str, int] = {}
-    
+
     async def handle_message(
         self,
         session_id: str,
@@ -38,14 +38,14 @@ class WebSocketAdapter:
     ) -> None:
         """
         Handle an incoming WebSocket message.
-        
+
         Args:
             session_id: Session identifier
             data: Raw bytes (PCM) or JSON string with base64 audio
             source: Source identifier for metadata
         """
         pcm_data: Optional[bytes] = None
-        
+
         if isinstance(data, bytes):
             # Raw PCM int16
             pcm_data = data
@@ -60,13 +60,13 @@ class WebSocketAdapter:
             except (json.JSONDecodeError, KeyError):
                 logger.warning(f"Invalid JSON message for session {session_id}")
                 return
-        
+
         if pcm_data is None or len(pcm_data) == 0:
             return
-        
+
         seq = self._sequence.get(session_id, 0)
         self._sequence[session_id] = seq + 1
-        
+
         frame = AudioFrame(
             session_id=session_id,
             pcm_data=pcm_data,
@@ -74,9 +74,9 @@ class WebSocketAdapter:
             sequence=seq,
             source=source,
         )
-        
+
         await self.bus.publish(frame)
-    
+
     async def close_session(self, session_id: str) -> None:
         """Signal end of session."""
         self._sequence.pop(session_id, None)

@@ -6,11 +6,10 @@ Converts real-world outcomes into training signals for:
 2. ConversationPredictor (session outcomes → forward-looking head targets)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from prosody_ssm.model import EmotionLabel
-
 
 # ==============================================================================
 # Per-Utterance Mapping

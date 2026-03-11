@@ -13,27 +13,27 @@ This package provides:
 - Conversation-level tracking with TTS/LLM integration
 """
 
-from prosody_ssm.features import ProsodyFeatureExtractor, PhoneticFeatureExtractor
+from prosody_ssm.conversation import (
+    AgentTone,
+    ConversationEmotionState,
+    EmotionTracker,
+    EmotionTrajectory,
+    EscalationRisk,
+    format_emotion_context_compact,
+    format_emotion_context_for_llm,
+    get_tts_params_for_tone,
+)
+from prosody_ssm.emotions import Emotion, EmotionAnnotator
+from prosody_ssm.features import PhoneticFeatureExtractor, ProsodyFeatureExtractor
 from prosody_ssm.model import (
-    ProsodySSM,
-    ProsodySSMClassifier,  # backward-compat alias
-    ProsodyPrediction,
-    KPIModelConfig,
-    KPIModelOutput,
     # Legacy — kept for existing code
     EmotionLabel,
     EmotionPrediction,
-)
-from prosody_ssm.emotions import EmotionAnnotator, Emotion
-from prosody_ssm.conversation import (
-    EmotionTracker,
-    ConversationEmotionState,
-    EmotionTrajectory,
-    EscalationRisk,
-    AgentTone,
-    get_tts_params_for_tone,
-    format_emotion_context_for_llm,
-    format_emotion_context_compact,
+    KPIModelConfig,
+    KPIModelOutput,
+    ProsodyPrediction,
+    ProsodySSM,
+    ProsodySSMClassifier,  # backward-compat alias
 )
 
 __version__ = "0.2.0"
