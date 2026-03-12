@@ -490,20 +490,17 @@ if TORCH_AVAILABLE:
         """
         State Space Model for prosody analysis and KPI outcome prediction.
 
-        Feature backbone:
-            - use_wavlm=True: frozen WavLM-Large extracts features from raw
-              16kHz waveforms. Requires the 'transformers' package.
-            - use_wavlm=False: legacy MFCC/prosodic feature embeddings
-              (backward compat, CPU inference without heavy dependencies).
-
-        SSM backbone: stack of Mamba blocks. Uses mamba_ssm.Mamba when
-        available, falls back to a hand-rolled S4D implementation otherwise.
-
         Output heads:
             - Emotion classifier (pretraining — public emotion corpora)
             - VAD regression (continuous prosodic state dimensions)
+            - Prosodic signal heads (interpreted hidden state)
             - KPI-conditioned prediction (downstream — client outcomes)
         """
+
+        SIGNAL_NAMES = [
+            "engagement", "stress", "certainty", "rapport",
+            "empathy", "tempo", "intensity", "expressiveness",
+        ]
 
         def __init__(
             self,
@@ -616,10 +613,21 @@ if TORCH_AVAILABLE:
                     nn.Linear(d_model // 2, n_speakers),
                 )
 
+            # Prosodic signal heads — interpret the SSM hidden state into
+            # actionable signals (engagement, stress, certainty, etc.)
+            self.signal_heads = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model // 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model // 4, len(self.SIGNAL_NAMES)),
+                nn.Sigmoid(),
+            )
+
             self._init_weights()
 
         def _init_weights(self):
-            targets = [self.classifier, self.vad_head, self.kpi_head]
+            targets = [self.classifier, self.vad_head, self.kpi_head, self.signal_heads]
             if self.use_wavlm:
                 targets.append(self.backbone.proj)
             else:
@@ -739,11 +747,15 @@ if TORCH_AVAILABLE:
             emotion_logits = self.classifier(repr)
             vad = self.vad_head(repr)
 
+            signal_values = self.signal_heads(repr)
+            signals = dict(zip(self.SIGNAL_NAMES, signal_values.unbind(-1), strict=True))
+
             result = {
                 "emotion_logits": emotion_logits,
                 "vad": vad,
                 "repr": repr,
                 "sequence_repr": sequence_repr,
+                "signals": signals,
             }
 
             if self.n_speakers > 0 and hasattr(self, "speaker_head"):
@@ -773,7 +785,7 @@ if TORCH_AVAILABLE:
             """
             Streaming forward for real-time prosodic signal generation.
 
-            WavLM + Mamba path (use_wavlm=True):
+        WavLM + Mamba path (use_wavlm=True):
                 waveform_chunk: (batch, samples) — raw audio chunk at 16kHz.
                 Typical chunk size: 0.5-2s of audio. WavLM processes the chunk,
                 then Mamba steps through each WavLM frame using inference_params.
@@ -869,8 +881,11 @@ if TORCH_AVAILABLE:
             emotion_logits = self.classifier(x_out)
             emotion_probs = F.softmax(emotion_logits, dim=-1)
             vad = self.vad_head(x_out)
+            signal_values = self.signal_heads(x_out)
+            signals = dict(zip(self.SIGNAL_NAMES, signal_values.unbind(-1), strict=True))
 
             new_state['repr'] = x_out
+            new_state['signals'] = signals
             return emotion_probs, vad, new_state
 
         def predict(

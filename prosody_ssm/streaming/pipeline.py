@@ -257,28 +257,24 @@ class ProsodicPipeline:
             emotion_probs_dict = {e.value: float(probs_np[i]) for i, e in enumerate(emotions) if i < len(probs_np)}
 
             best_idx = int(np.argmax(probs_np))
-            current_emotion = emotions[best_idx].value if best_idx < len(emotions) else "neutral"
             confidence = float(probs_np[best_idx])
+            predicted_emotion = emotions[best_idx].value if best_idx < len(emotions) else "neutral"
+            # Only show an emotion when model is confident enough to be useful; otherwise neutral
+            suppress_when_uncertain = {"fearful", "disgusted", "contempt"}
+            neutral_idx = list(EmotionLabel).index(EmotionLabel.NEUTRAL)
+            if confidence < 0.45:
+                current_emotion = "neutral"
+                confidence = float(probs_np[neutral_idx]) if len(probs_np) > neutral_idx else 0.0
+            elif predicted_emotion in suppress_when_uncertain and confidence < 0.55:
+                current_emotion = "neutral"
+                confidence = float(probs_np[neutral_idx]) if len(probs_np) > neutral_idx else 0.0
+            else:
+                current_emotion = predicted_emotion
 
             valence = float(vad_np[0]) if len(vad_np) > 0 else 0.0
             arousal = float(vad_np[1]) if len(vad_np) > 1 else 0.5
             dominance = float(vad_np[2]) if len(vad_np) > 2 else 0.5
-        else:
-            # Heuristic mode: derive emotion from prosody features directly
-            if frame.energy > 0.1 and frame.f0_mean > 200:
-                current_emotion = "angry"
-                valence = -0.5
-                arousal = 0.8
-            elif frame.energy < 0.02:
-                current_emotion = "sad"
-                valence = -0.3
-                arousal = 0.3
-            else:
-                current_emotion = "neutral"
-                valence = 0.0
-                arousal = 0.5
-            confidence = 0.5
-            emotion_probs_dict = {current_emotion: confidence}
+        # When no model: keep defaults (neutral, 0 confidence). No heuristics.
 
         # Track history for ConversationPredictor
         state.prosody_history.append({
