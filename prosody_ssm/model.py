@@ -1124,10 +1124,14 @@ if TORCH_AVAILABLE:
             if not self.use_wavlm:
                 full_config['prosody_dim'] = config.get('prosody_dim', self.prosody_dim)
                 full_config['phonetic_dim'] = config.get('phonetic_dim', self.phonetic_dim)
+            from pathlib import Path
+            dest = Path(model_path)
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
             torch.save({
                 'model_state_dict': self.state_dict(),
                 'config': full_config,
-            }, model_path)
+            }, tmp)
+            tmp.rename(dest)
 
 
     # -------------------------------------------------------------------
