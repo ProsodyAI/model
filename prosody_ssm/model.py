@@ -483,6 +483,91 @@ if TORCH_AVAILABLE:
 
 
     # -------------------------------------------------------------------
+    # Sequence-level heads (per-frame predictions on sequence_repr)
+    # -------------------------------------------------------------------
+
+    SEQUENCE_HEAD_NAMES = [
+        "speaker_activity",
+        "turn_boundary",
+        "stress_trajectory",
+        "engagement_trajectory",
+        "interruption_likelihood",
+    ]
+
+    EVENT_TAG_NAMES = [
+        "hesitation", "laughter", "filler", "emphasis",
+        "overlap", "silence", "backchannel",
+    ]
+
+    class SequenceHeads(nn.Module):
+        """
+        Per-frame heads that operate on sequence_repr (B, T, d_model).
+
+        Outputs frame-level predictions that can also be pooled to
+        utterance-level summaries.
+
+        Heads:
+            - speaker_activity: (B, T) sigmoid — voice activity per frame
+            - turn_boundary: (B, T) sigmoid — probability this frame is a turn boundary
+            - stress_trajectory: (B, T) sigmoid — per-frame stress level
+            - engagement_trajectory: (B, T) sigmoid — per-frame engagement level
+            - interruption_likelihood: (B, T) sigmoid — probability of interruption at frame
+            - event_tags: (B, T, n_events) sigmoid — multi-label event tags per frame
+        """
+
+        def __init__(self, d_model: int, n_events: int = 7, dropout: float = 0.1):
+            super().__init__()
+            self.d_model = d_model
+            self.n_events = n_events
+
+            self.shared = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+
+            d_shared = d_model // 2
+
+            self.speaker_activity = nn.Linear(d_shared, 1)
+            self.turn_boundary = nn.Linear(d_shared, 1)
+            self.stress_trajectory = nn.Linear(d_shared, 1)
+            self.engagement_trajectory = nn.Linear(d_shared, 1)
+            self.interruption_likelihood = nn.Linear(d_shared, 1)
+            self.event_tags = nn.Linear(d_shared, n_events)
+
+        def forward(self, sequence_repr: torch.Tensor) -> dict[str, torch.Tensor]:
+            """
+            Args:
+                sequence_repr: (B, T, d_model)
+
+            Returns:
+                dict with per-frame predictions and pooled utterance-level summaries.
+            """
+            h = self.shared(sequence_repr)  # (B, T, d_model//2)
+
+            frame = {
+                "speaker_activity": torch.sigmoid(self.speaker_activity(h).squeeze(-1)),
+                "turn_boundary": torch.sigmoid(self.turn_boundary(h).squeeze(-1)),
+                "stress_trajectory": torch.sigmoid(self.stress_trajectory(h).squeeze(-1)),
+                "engagement_trajectory": torch.sigmoid(self.engagement_trajectory(h).squeeze(-1)),
+                "interruption_likelihood": torch.sigmoid(self.interruption_likelihood(h).squeeze(-1)),
+                "event_tags": torch.sigmoid(self.event_tags(h)),
+            }
+
+            pooled = {
+                "speaker_activity_avg": frame["speaker_activity"].mean(dim=1),
+                "turn_boundary_max": frame["turn_boundary"].max(dim=1).values,
+                "stress_level": frame["stress_trajectory"].mean(dim=1),
+                "engagement_level": frame["engagement_trajectory"].mean(dim=1),
+                "interruption_risk": frame["interruption_likelihood"].max(dim=1).values,
+                "event_tag_any": (frame["event_tags"].max(dim=1).values > 0.5).float(),
+            }
+
+            return {"frame": frame, "pooled": pooled}
+
+
+    # -------------------------------------------------------------------
     # Main model
     # -------------------------------------------------------------------
 
@@ -521,6 +606,8 @@ if TORCH_AVAILABLE:
             specaugment_prob: float = 0.0,
             specaugment_time_mask: int = 20,
             specaugment_freq_mask: int = 64,
+            use_sequence_heads: bool = True,
+            n_event_tags: int = 7,
         ):
             super().__init__()
 
@@ -537,6 +624,8 @@ if TORCH_AVAILABLE:
             self.specaugment_prob = specaugment_prob
             self.specaugment_time_mask = specaugment_time_mask
             self.specaugment_freq_mask = specaugment_freq_mask
+            self.use_sequence_heads = use_sequence_heads
+            self.n_event_tags = n_event_tags
 
             # --- Feature extraction ---
             if use_wavlm:
@@ -624,6 +713,9 @@ if TORCH_AVAILABLE:
                 nn.Sigmoid(),
             )
 
+            if use_sequence_heads:
+                self.seq_heads = SequenceHeads(d_model, n_events=n_event_tags, dropout=dropout)
+
             self._init_weights()
 
         def _init_weights(self):
@@ -636,6 +728,8 @@ if TORCH_AVAILABLE:
                 targets.extend([self.prosody_stream, self.stream_gate])
             if self.n_speakers > 0:
                 targets.append(self.speaker_head)
+            if self.use_sequence_heads:
+                targets.append(self.seq_heads)
             if not MAMBA_SSM_AVAILABLE:
                 targets.extend(list(self.blocks))
             for target in targets:
@@ -726,7 +820,7 @@ if TORCH_AVAILABLE:
             kpi_range: Optional[torch.Tensor] = None,
         ) -> dict[str, torch.Tensor]:
             """
-            Forward pass: emotion classification, VAD, and KPI prediction.
+            Forward pass: emotion classification, VAD, KPI prediction, and sequence heads.
 
             Returns:
                 Dict with:
@@ -734,9 +828,12 @@ if TORCH_AVAILABLE:
                     'vad': (batch, 3) — valence, arousal, dominance
                     'repr': (batch, d_model) — pooled representation
                     'sequence_repr': (batch, seq_len, d_model) — full sequence
+                    'signals': dict of 8 keys → (batch,) — interpretable signals
                     'speaker_logits': (batch, n_speakers) — if speaker head enabled
                     'kpi_value': (batch,) — if kpi_type provided
                     'kpi_category_logits': (batch, max_categories) — for categorical KPIs
+                    'seq_frame': dict of per-frame predictions — if sequence heads enabled
+                    'seq_pooled': dict of utterance-level summaries — if sequence heads enabled
             """
             sequence_repr, repr = self.encode(
                 waveform=waveform,
@@ -771,6 +868,11 @@ if TORCH_AVAILABLE:
                 )
                 result["kpi_value"] = kpi_out["value"]
                 result["kpi_category_logits"] = kpi_out["category_logits"]
+
+            if self.use_sequence_heads and hasattr(self, "seq_heads"):
+                seq_out = self.seq_heads(sequence_repr)
+                result["seq_frame"] = seq_out["frame"]
+                result["seq_pooled"] = seq_out["pooled"]
 
             return result
 
@@ -1062,6 +1164,7 @@ if TORCH_AVAILABLE:
             "use_weighted_wavlm_layers", "use_dual_stream_fusion",
             "n_speakers", "speaker_grl_alpha",
             "specaugment_prob", "specaugment_time_mask", "specaugment_freq_mask",
+            "use_sequence_heads", "n_event_tags",
         }
 
         @classmethod
@@ -1120,6 +1223,8 @@ if TORCH_AVAILABLE:
                 'specaugment_prob': self.specaugment_prob,
                 'specaugment_time_mask': self.specaugment_time_mask,
                 'specaugment_freq_mask': self.specaugment_freq_mask,
+                'use_sequence_heads': self.use_sequence_heads,
+                'n_event_tags': self.n_event_tags,
             }
             if not self.use_wavlm:
                 full_config['prosody_dim'] = config.get('prosody_dim', self.prosody_dim)
